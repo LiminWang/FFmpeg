@@ -138,5 +138,5 @@ AVCodec ff_cavs_decoder = {
     .decode         = xavs_decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY,
     .flush          = xavs_flush,
-    .long_name      = NULL_IF_CONFIG_SMALL("Bravo Chinese AVS(AVS1-P2, JiZhun profile) and (AVS1-P16, Guangdian profile)"),
+    .long_name      = NULL_IF_CONFIG_SMALL("Chinese AVS(AVS1-P2, JiZhun profile) and (AVS1-P16, Guangdian profile)"),
 };
