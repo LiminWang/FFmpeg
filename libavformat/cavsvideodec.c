@@ -49,9 +49,17 @@ static int cavsvideo_probe(AVProbeData *p)
             }
             if (code == CAVS_SEQ_START_CODE) {
                 seq++;
-                /* check for the only currently supported profile */
-                if (*ptr != CAVS_PROFILE_JIZHUN)
+#if 0
+                 /* check for the only currently supported profile */
+                 if (*ptr != CAVS_PROFILE_JIZHUN)
+                     return 0;
+#else
+                if(*ptr == 0x48) {
+                    av_log(NULL, AV_LOG_INFO, "GuangDian profile!\n");
+                } else if(*ptr != CAVS_PROFILE_JIZHUN && *ptr != 0x48) {
                     return 0;
+                }
+#endif
             } else if ((code == CAVS_PIC_I_START_CODE) ||
                        (code == CAVS_PIC_PB_START_CODE)) {
                 pic++;

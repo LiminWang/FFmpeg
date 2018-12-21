@@ -237,8 +237,6 @@ OBJS-$(CONFIG_BMV_AUDIO_DECODER)       += bmvaudio.o
 OBJS-$(CONFIG_BMV_VIDEO_DECODER)       += bmvvideo.o
 OBJS-$(CONFIG_BRENDER_PIX_DECODER)     += brenderpix.o
 OBJS-$(CONFIG_C93_DECODER)             += c93.o
-OBJS-$(CONFIG_CAVS_DECODER)            += cavs.o cavsdec.o cavsdsp.o \
-                                          cavsdata.o
 OBJS-$(CONFIG_CCAPTION_DECODER)        += ccaption_dec.o
 OBJS-$(CONFIG_CDGRAPHICS_DECODER)      += cdgraphics.o
 OBJS-$(CONFIG_CDXL_DECODER)            += cdxl.o
@@ -715,6 +713,7 @@ OBJS-$(CONFIG_XFACE_ENCODER)           += xfaceenc.o xface.o
 OBJS-$(CONFIG_XL_DECODER)              += xl.o
 OBJS-$(CONFIG_XMA1_DECODER)            += wmaprodec.o wma.o wma_common.o
 OBJS-$(CONFIG_XMA2_DECODER)            += wmaprodec.o wma.o wma_common.o
+OBJS-$(CONFIG_CAVS_DECODER)            += xavsdec.o
 OBJS-$(CONFIG_XPM_DECODER)             += xpmdec.o
 OBJS-$(CONFIG_XSUB_DECODER)            += xsubdec.o
 OBJS-$(CONFIG_XSUB_ENCODER)            += xsubenc.o
