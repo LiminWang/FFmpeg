@@ -87,6 +87,9 @@ the timing info in the sequence header.
 Set the number of ticks in each picture, to indicate that the stream
 has a fixed framerate.  Ignored if @option{tick_rate} is not also set.
 
+@item delete_padding
+Deletes Padding OBUs.
+
 @end table
 
 @section chomp
@@ -561,7 +564,7 @@ P3 D65
 @end table
 
 @item transfer_characteristics
-Set the color transfert.
+Set the color transfer.
 Available values are:
 
 @table @samp
