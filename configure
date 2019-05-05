@@ -3742,6 +3742,8 @@ mkdir -p ffbuild
 # find source path
 if test -f configure; then
     source_path=.
+elif test -f src/configure; then
+    source_path=src
 else
     source_path=$(cd $(dirname "$0"); pwd)
     case "$source_path" in
@@ -5416,7 +5418,7 @@ link_name=$(mktemp -u $TMPDIR/name_XXXXXXXX)
 mkdir "$link_dest"
 $ln_s "$link_dest" "$link_name"
 touch "$link_dest/test_file"
-if [ "$source_path" != "." ] && ([ ! -d src ] || [ -L src ]) && [ -e "$link_name/test_file" ]; then
+if [ "$source_path" != "." ] && [ "$source_path" != "src" ] && ([ ! -d src ] || [ -L src ]) && [ -e "$link_name/test_file" ]; then
     # create link to source path
     [ -e src ] && rm src
     $ln_s "$source_path" src
@@ -5458,6 +5460,7 @@ probe_libc(){
             add_${pfx}cppflags -D__printf__=__gnu_printf__
         test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600" &&
             add_${pfx}cppflags -D_WIN32_WINNT=0x0600
+        add_${pfx}cppflags -D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600
     elif test_${pfx}cpp_condition _mingw.h "defined __MINGW_VERSION"  ||
          test_${pfx}cpp_condition _mingw.h "defined __MINGW32_VERSION"; then
         eval ${pfx}libc_type=mingw32
@@ -5471,6 +5474,7 @@ probe_libc(){
             add_${pfx}cppflags -D_WIN32_WINNT=0x0600
         eval test \$${pfx_no_}cc_type = "gcc" &&
             add_${pfx}cppflags -D__printf__=__gnu_printf__
+        add_${pfx}cppflags -D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600
     elif test_${pfx}cpp_condition crtversion.h "defined _VC_CRT_MAJOR_VERSION"; then
         eval ${pfx}libc_type=msvcrt
         if test_${pfx}cpp_condition crtversion.h "_VC_CRT_MAJOR_VERSION < 14"; then
