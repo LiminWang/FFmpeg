@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2017 Vittorio Giovara <vittorio.giovara@gmail.com>
- * Copyright (c) 2019 Limin Wang <lance.lmwang@gmail.com>
  *
  * This file is part of FFmpeg.
  *
@@ -72,13 +71,6 @@ typedef struct TonemapContext {
     const struct LumaCoefficients *coeffs;
 } TonemapContext;
 
-typedef struct ThreadData {
-    AVFrame *in, *out;
-    double peak;
-    const struct AVPixFmtDescriptor *desc;
-    const struct AVPixFmtDescriptor *odesc;
-} ThreadData;
-
 static const enum AVPixelFormat pix_fmts[] = {
     AV_PIX_FMT_GBRPF32,
     AV_PIX_FMT_GBRAPF32,
@@ -135,10 +127,15 @@ static float mobius(float in, float j, double peak)
 }
 
 #define MIX(x,y,a) (x) * (1 - (a)) + (y) * (a)
-static void tonemap(TonemapContext *s, float *r_out, float *b_out, float *g_out,
-                    const float *r_in, const float *b_in, const float *g_in,
-                    const AVPixFmtDescriptor *desc, double peak)
+static void tonemap(TonemapContext *s, AVFrame *out, const AVFrame *in,
+                    const AVPixFmtDescriptor *desc, int x, int y, double peak)
 {
+    const float *r_in = (const float *)(in->data[0] + x * desc->comp[0].step + y * in->linesize[0]);
+    const float *b_in = (const float *)(in->data[1] + x * desc->comp[1].step + y * in->linesize[1]);
+    const float *g_in = (const float *)(in->data[2] + x * desc->comp[2].step + y * in->linesize[2]);
+    float *r_out = (float *)(out->data[0] + x * desc->comp[0].step + y * out->linesize[0]);
+    float *b_out = (float *)(out->data[1] + x * desc->comp[1].step + y * out->linesize[1]);
+    float *g_out = (float *)(out->data[2] + x * desc->comp[2].step + y * out->linesize[2]);
     float sig, sig_orig;
 
     /* load values */
@@ -192,63 +189,28 @@ static void tonemap(TonemapContext *s, float *r_out, float *b_out, float *g_out,
     *r_out *= sig / sig_orig;
     *g_out *= sig / sig_orig;
     *b_out *= sig / sig_orig;
-
 }
 
-static int do_tonemap_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+typedef struct ThreadData {
+    AVFrame *in, *out;
+    const AVPixFmtDescriptor *desc;
+    double peak;
+} ThreadData;
+
+static int tonemap_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
 {
     TonemapContext *s = ctx->priv;
-    const ThreadData *td = arg;
-    const AVFrame *in = td->in;
+    ThreadData *td = arg;
+    AVFrame *in = td->in;
     AVFrame *out = td->out;
-    int x, y;
     const AVPixFmtDescriptor *desc = td->desc;
-    const AVPixFmtDescriptor *odesc = td->odesc;
-    const int slice_start = (out->height *  jobnr   ) / nb_jobs;
-    const int slice_end   = (out->height * (jobnr+1)) / nb_jobs;
-    const int slice_h   = slice_end - slice_start;
-    uint8_t *dstr = out->data[0] + slice_start * out->linesize[0];
-    uint8_t *dstb = out->data[1] + slice_start * out->linesize[1];
-    uint8_t *dstg = out->data[2] + slice_start * out->linesize[2];
-    const uint8_t *srcr = in->data[0] + slice_start * in->linesize[0];
-    const uint8_t *srcb = in->data[1] + slice_start * in->linesize[1];
-    const uint8_t *srcg = in->data[2] + slice_start * in->linesize[2];
-    uint8_t *dsta = out->data[3] + slice_start * out->linesize[3];
-    const uint8_t *srca = in ->data[3] + slice_start * in->linesize[3];
+    const int slice_start = (in->height * jobnr) / nb_jobs;
+    const int slice_end = (in->height * (jobnr+1)) / nb_jobs;
+    double peak = td->peak;
 
-    /* do the tone map */
-    for (y = slice_start; y < slice_end; y++) {
-        for (x = 0; x < out->width; x++) {
-            const float *r_in = (const float *)(srcr + x * desc->comp[0].step);
-            const float *b_in = (const float *)(srcb + x * desc->comp[1].step);
-            const float *g_in = (const float *)(srcg + x * desc->comp[2].step);
-            float *r_out = (float *)(dstr + x * desc->comp[0].step);
-            float *b_out = (float *)(dstb + x * desc->comp[1].step);
-            float *g_out = (float *)(dstg + x * desc->comp[2].step);
-
-            tonemap(s, r_out, b_out, g_out, r_in, b_in, g_in, desc, td->peak);
-        }
-        srcr += in->linesize[0];
-        srcg += in->linesize[1];
-        srcb += in->linesize[2];
-        dstr += out->linesize[0];
-        dstg += out->linesize[1];
-        dstb += out->linesize[2];
-    }
-
-    /* copy/generate alpha if needed */
-    if (desc->flags & AV_PIX_FMT_FLAG_ALPHA && odesc->flags & AV_PIX_FMT_FLAG_ALPHA) {
-        av_image_copy_plane(dsta, out->linesize[3],
-                srca, in->linesize[3],
-                out->linesize[3], slice_h);
-    } else if (odesc->flags & AV_PIX_FMT_FLAG_ALPHA) {
-        for (y = slice_start; y < slice_end; y++) {
-            for (x = 0; x < out->width; x++) {
-                AV_WN32(dsta + x * odesc->comp[3].step + y * out->linesize[3],
-                        av_float2int(1.0f));
-            }
-        }
-    }
+    for (int y = slice_start; y < slice_end; y++)
+        for (int x = 0; x < out->width; x++)
+            tonemap(s, out, in, desc, x, y, peak);
 
     return 0;
 }
@@ -257,13 +219,13 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
 {
     AVFilterContext *ctx = link->dst;
     TonemapContext *s = ctx->priv;
-    AVFilterLink *outlink = link->dst->outputs[0];
+    AVFilterLink *outlink = ctx->outputs[0];
+    ThreadData td;
     AVFrame *out;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
     const AVPixFmtDescriptor *odesc = av_pix_fmt_desc_get(outlink->format);
-    int ret;
+    int ret, x, y;
     double peak = s->peak;
-    ThreadData td;
 
     if (!desc || !odesc) {
         av_frame_free(&in);
@@ -308,12 +270,26 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
         s->desat = 0;
     }
 
-    td.in = in;
+    /* do the tone map */
     td.out = out;
+    td.in = in;
     td.desc = desc;
-    td.odesc = odesc;
     td.peak = peak;
-    ctx->internal->execute(ctx, do_tonemap_slice, &td, NULL, FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
+    ctx->internal->execute(ctx, tonemap_slice, &td, NULL, FFMIN(in->height, ff_filter_get_nb_threads(ctx)));
+
+    /* copy/generate alpha if needed */
+    if (desc->flags & AV_PIX_FMT_FLAG_ALPHA && odesc->flags & AV_PIX_FMT_FLAG_ALPHA) {
+        av_image_copy_plane(out->data[3], out->linesize[3],
+                            in->data[3], in->linesize[3],
+                            out->linesize[3], outlink->h);
+    } else if (odesc->flags & AV_PIX_FMT_FLAG_ALPHA) {
+        for (y = 0; y < out->height; y++) {
+            for (x = 0; x < out->width; x++) {
+                AV_WN32(out->data[3] + x * odesc->comp[3].step + y * out->linesize[3],
+                        av_float2int(1.0f));
+            }
+        }
+    }
 
     av_frame_free(&in);
 
