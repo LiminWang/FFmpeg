@@ -47,10 +47,19 @@ enum EvalMode {
     EVAL_MODE_NB
 };
 
+#define MAX_THREADS  (2)
+typedef struct ThreadData {
+    AVFrame *in;
+    AVFrame *out;
+    int w, h;
+    int mul;
+    int field;
+} ThreadData;
+
 typedef struct ScaleContext {
     const AVClass *class;
-    struct SwsContext *sws;     ///< software scaler context
-    struct SwsContext *isws[2]; ///< software scaler context for interlaced material
+    struct SwsContext *sws[MAX_THREADS];     ///< software scaler context
+    struct SwsContext *isws[MAX_THREADS][2]; ///< software scaler context for interlaced material
     AVDictionary *opts;
 
     /**
@@ -88,6 +97,7 @@ typedef struct ScaleContext {
     int force_original_aspect_ratio;
 
     int nb_slices;
+    int nb_threads;
 
     int eval_mode;              ///< expression evaluation mode
 
@@ -140,6 +150,11 @@ static av_cold int init_dict(AVFilterContext *ctx, AVDictionary **opts)
             return ret;
     }
     scale->opts = *opts;
+    scale->nb_threads = 1;
+    if (scale->nb_slices > 0)
+        scale->nb_threads = FFMIN(scale->nb_slices, MAX_THREADS);
+
+    av_log(ctx, AV_LOG_VERBOSE, "scale, nb_threads: %d\n", scale->nb_threads);
     *opts = NULL;
 
     return 0;
@@ -148,10 +163,12 @@ static av_cold int init_dict(AVFilterContext *ctx, AVDictionary **opts)
 static av_cold void uninit(AVFilterContext *ctx)
 {
     ScaleContext *scale = ctx->priv;
-    sws_freeContext(scale->sws);
-    sws_freeContext(scale->isws[0]);
-    sws_freeContext(scale->isws[1]);
-    scale->sws = NULL;
+    for (int i = 0; i < scale->nb_threads; i++) {
+    sws_freeContext(scale->sws[i]);
+    sws_freeContext(scale->isws[i][0]);
+    sws_freeContext(scale->isws[i][1]);
+    scale->sws[i] = NULL;
+    };
     av_dict_free(&scale->opts);
 }
 
@@ -266,13 +283,16 @@ static int config_props(AVFilterLink *outlink)
     scale->output_is_pal = av_pix_fmt_desc_get(outfmt)->flags & AV_PIX_FMT_FLAG_PAL ||
                            av_pix_fmt_desc_get(outfmt)->flags & FF_PSEUDOPAL;
 
-    if (scale->sws)
-        sws_freeContext(scale->sws);
-    if (scale->isws[0])
-        sws_freeContext(scale->isws[0]);
-    if (scale->isws[1])
-        sws_freeContext(scale->isws[1]);
-    scale->isws[0] = scale->isws[1] = scale->sws = NULL;
+    for ( int i = 0; i < scale->nb_threads; i++) {
+    if (scale->sws[i])
+        sws_freeContext(scale->sws[i]);
+    if (scale->isws[i][0])
+        sws_freeContext(scale->isws[i][0]);
+    if (scale->isws[i][1])
+        sws_freeContext(scale->isws[i][1]);
+    scale->isws[i][0] = scale->isws[i][1] = scale->sws[i] = NULL;
+    }
+
     if (inlink0->w == outlink->w &&
         inlink0->h == outlink->h &&
         !scale->out_color_matrix &&
@@ -280,12 +300,16 @@ static int config_props(AVFilterLink *outlink)
         inlink0->format == outlink->format)
         ;
     else {
-        struct SwsContext **swscs[3] = {&scale->sws, &scale->isws[0], &scale->isws[1]};
+        struct SwsContext **swscs[MAX_THREADS][3];
+        for (int k = 0; k < scale->nb_threads; k++) {
         int i;
 
+        swscs[k][0] = &scale->sws[k];
+        swscs[k][1] = &scale->isws[k][0];
+        swscs[k][2] = &scale->isws[k][1];
         for (i = 0; i < 3; i++) {
             int in_v_chr_pos = scale->in_v_chr_pos, out_v_chr_pos = scale->out_v_chr_pos;
-            struct SwsContext **s = swscs[i];
+            struct SwsContext **s = swscs[k][i];
             *s = sws_alloc_context();
             if (!*s)
                 return AVERROR(ENOMEM);
@@ -334,6 +358,7 @@ static int config_props(AVFilterLink *outlink)
             if (!scale->interlaced)
                 break;
         }
+        }
     }
 
     if (inlink0->sample_aspect_ratio.num){
@@ -376,9 +401,9 @@ static int request_frame_ref(AVFilterLink *outlink)
     return ff_request_frame(outlink->src->inputs[1]);
 }
 
-static int scale_slice(AVFilterLink *link, AVFrame *out_buf, AVFrame *cur_pic, struct SwsContext *sws, int y, int h, int mul, int field)
+static int scale_slice(AVFilterContext *ctx, AVFrame *out_buf, AVFrame *cur_pic, struct SwsContext *sws, int y, int h, int mul, int field)
 {
-    ScaleContext *scale = link->dst->priv;
+    ScaleContext *scale = ctx->priv;
     const uint8_t *in[4];
     uint8_t *out[4];
     int in_stride[4],out_stride[4];
@@ -400,10 +425,28 @@ static int scale_slice(AVFilterLink *link, AVFrame *out_buf, AVFrame *cur_pic, s
                          out,out_stride);
 }
 
+static int do_scale_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    ScaleContext *scale = ctx->priv;
+    ThreadData *td  = arg;
+    int slice_start = (td->h *  jobnr   ) / nb_jobs;
+    int slice_end   = (td->h * (jobnr+1)) / nb_jobs;
+    int slice_h     = slice_end - slice_start;
+
+    if(scale->interlaced>0 || (scale->interlaced<0 && td->in->interlaced_frame)){
+        scale_slice(ctx, td->out, td->in, scale->isws[jobnr][0], slice_start, (slice_h+1)/2, 2, 0);
+        scale_slice(ctx, td->out, td->in, scale->isws[jobnr][1], slice_start,  slice_h/2, 2, 1);
+    } else
+        scale_slice(ctx, td->out, td->in, scale->sws[jobnr], slice_start, slice_h, 1, 0);
+
+    return 0;
+}
+
 static int filter_frame(AVFilterLink *link, AVFrame *in)
 {
-    ScaleContext *scale = link->dst->priv;
-    AVFilterLink *outlink = link->dst->outputs[0];
+    AVFilterContext *ctx = link->dst;
+    ScaleContext *scale = ctx->priv;
+    AVFilterLink *outlink = ctx->outputs[0];
     AVFrame *out;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
     char buf[32];
@@ -437,7 +480,7 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
             return ret;
     }
 
-    if (!scale->sws)
+    if (!scale->sws[0])
         return ff_filter_frame(outlink, in);
 
     scale->hsub = desc->log2_chroma_w;
@@ -458,6 +501,7 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
 
     in_range = in->color_range;
 
+    for (int k = 0; k < scale->nb_threads; k++) {
     if (   scale->in_color_matrix
         || scale->out_color_matrix
         || scale-> in_range != AVCOL_RANGE_UNSPECIFIED
@@ -466,9 +510,9 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
         int in_full, out_full, brightness, contrast, saturation;
         const int *inv_table, *table;
 
-        sws_getColorspaceDetails(scale->sws, (int **)&inv_table, &in_full,
-                                 (int **)&table, &out_full,
-                                 &brightness, &contrast, &saturation);
+        sws_getColorspaceDetails(scale->sws[k], (int **)&inv_table, &in_full,
+                (int **)&table, &out_full,
+                &brightness, &contrast, &saturation);
 
         if (scale->in_color_matrix)
             inv_table = parse_yuv_type(scale->in_color_matrix, in->colorspace);
@@ -484,19 +528,20 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
         if (scale->out_range != AVCOL_RANGE_UNSPECIFIED)
             out_full = (scale->out_range == AVCOL_RANGE_JPEG);
 
-        sws_setColorspaceDetails(scale->sws, inv_table, in_full,
-                                 table, out_full,
-                                 brightness, contrast, saturation);
-        if (scale->isws[0])
-            sws_setColorspaceDetails(scale->isws[0], inv_table, in_full,
-                                     table, out_full,
-                                     brightness, contrast, saturation);
-        if (scale->isws[1])
-            sws_setColorspaceDetails(scale->isws[1], inv_table, in_full,
-                                     table, out_full,
-                                     brightness, contrast, saturation);
+        sws_setColorspaceDetails(scale->sws[k], inv_table, in_full,
+                table, out_full,
+                brightness, contrast, saturation);
+        if (scale->isws[k][0])
+            sws_setColorspaceDetails(scale->isws[k][0], inv_table, in_full,
+                    table, out_full,
+                    brightness, contrast, saturation);
+        if (scale->isws[k][1])
+            sws_setColorspaceDetails(scale->isws[k][1], inv_table, in_full,
+                    table, out_full,
+                    brightness, contrast, saturation);
 
         out->color_range = out_full ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+    }
     }
 
     av_reduce(&out->sample_aspect_ratio.num, &out->sample_aspect_ratio.den,
@@ -504,23 +549,10 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
               (int64_t)in->sample_aspect_ratio.den * outlink->w * link->h,
               INT_MAX);
 
-    if(scale->interlaced>0 || (scale->interlaced<0 && in->interlaced_frame)){
-        scale_slice(link, out, in, scale->isws[0], 0, (link->h+1)/2, 2, 0);
-        scale_slice(link, out, in, scale->isws[1], 0,  link->h   /2, 2, 1);
-    }else if (scale->nb_slices) {
-        int i, slice_h, slice_start, slice_end = 0;
-        const int nb_slices = FFMIN(scale->nb_slices, link->h);
-        for (i = 0; i < nb_slices; i++) {
-            slice_start = slice_end;
-            slice_end   = (link->h * (i+1)) / nb_slices;
-            slice_h     = slice_end - slice_start;
-            scale_slice(link, out, in, scale->sws, slice_start, slice_h, 1, 0);
-        }
-    }else{
-        scale_slice(link, out, in, scale->sws, 0, link->h, 1, 0);
-    }
-
+    ThreadData td = { .in = in, .out = out, .h = link->h };
+    ctx->internal->execute(ctx, do_scale_slice, &td, NULL, scale->nb_threads);
     av_frame_free(&in);
+
     return ff_filter_frame(outlink, out);
 }
 
@@ -639,6 +671,7 @@ AVFilter ff_vf_scale = {
     .inputs          = avfilter_vf_scale_inputs,
     .outputs         = avfilter_vf_scale_outputs,
     .process_command = process_command,
+    .flags           =  AVFILTER_FLAG_SLICE_THREADS,
 };
 
 static const AVClass scale2ref_class = {
