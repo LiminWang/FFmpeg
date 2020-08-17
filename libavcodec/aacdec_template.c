@@ -368,6 +368,15 @@ static uint64_t sniff_channel_order(uint8_t (*layout_map)[3], int tags)
         };
         i++;
     }
+    if (i < tags && layout_map[i][2] == AAC_CHANNEL_LFE) {
+        e2c_vec[i] = (struct elem_to_channel) {
+            .av_position  = AV_CH_LOW_FREQUENCY_2,
+            .syn_ele      = TYPE_LFE,
+            .elem_id      = layout_map[i][1],
+            .aac_position = AAC_CHANNEL_LFE
+        };
+        i++;
+    }
     while (i < tags && layout_map[i][2] == AAC_CHANNEL_LFE) {
         e2c_vec[i] = (struct elem_to_channel) {
             .av_position  = UINT64_MAX,
@@ -378,17 +387,77 @@ static uint64_t sniff_channel_order(uint8_t (*layout_map)[3], int tags)
         i++;
     }
 
-    // Must choose a stable sort
+    // The previous checks would end up at 8 at this point for 22.2
+    if (tags == 16 && i == 8) {
+        e2c_vec[i] = (struct elem_to_channel) {
+            .av_position  = AV_CH_TOP_FRONT_CENTER,
+            .syn_ele      = layout_map[i][0],
+            .elem_id      = layout_map[i][1],
+            .aac_position = layout_map[i][2]
+        }; i++;
+        i += assign_pair(e2c_vec, layout_map, i,
+                         AV_CH_TOP_FRONT_LEFT,
+                         AV_CH_TOP_FRONT_RIGHT,
+                         AAC_CHANNEL_FRONT);
+        i += assign_pair(e2c_vec, layout_map, i,
+                         AV_CH_TOP_SIDE_LEFT,
+                         AV_CH_TOP_SIDE_RIGHT,
+                         AAC_CHANNEL_SIDE);
+        e2c_vec[i] = (struct elem_to_channel) {
+            .av_position  = AV_CH_TOP_CENTER,
+            .syn_ele      = layout_map[i][0],
+            .elem_id      = layout_map[i][1],
+            .aac_position = layout_map[i][2]
+        }; i++;
+        i += assign_pair(e2c_vec, layout_map, i,
+                         AV_CH_TOP_BACK_LEFT,
+                         AV_CH_TOP_BACK_RIGHT,
+                         AAC_CHANNEL_BACK);
+        e2c_vec[i] = (struct elem_to_channel) {
+            .av_position  = AV_CH_TOP_BACK_CENTER,
+            .syn_ele      = layout_map[i][0],
+            .elem_id      = layout_map[i][1],
+            .aac_position = layout_map[i][2]
+        }; i++;
+        e2c_vec[i] = (struct elem_to_channel) {
+            .av_position  = AV_CH_BOTTOM_FRONT_CENTER,
+            .syn_ele      = layout_map[i][0],
+            .elem_id      = layout_map[i][1],
+            .aac_position = layout_map[i][2]
+        }; i++;
+        i += assign_pair(e2c_vec, layout_map, i,
+                         AV_CH_BOTTOM_FRONT_LEFT,
+                         AV_CH_BOTTOM_FRONT_RIGHT,
+                         AAC_CHANNEL_FRONT);
+    }
+
     total_non_cc_elements = n = i;
-    do {
-        int next_n = 0;
-        for (i = 1; i < n; i++)
-            if (e2c_vec[i - 1].av_position > e2c_vec[i].av_position) {
-                FFSWAP(struct elem_to_channel, e2c_vec[i - 1], e2c_vec[i]);
-                next_n = i;
-            }
-        n = next_n;
-    } while (n > 0);
+
+    if (tags == 16 && total_non_cc_elements == 16) {
+        // For 22.2 reorder the result as needed
+        FFSWAP(struct elem_to_channel, e2c_vec[2], e2c_vec[0]);   // FL & FR first (final), FC third
+        FFSWAP(struct elem_to_channel, e2c_vec[2], e2c_vec[1]);   // FC second (final), FLc & FRc third
+        FFSWAP(struct elem_to_channel, e2c_vec[6], e2c_vec[2]);   // LFE1 third (final), FLc & FRc seventh
+        FFSWAP(struct elem_to_channel, e2c_vec[4], e2c_vec[3]);   // BL & BR fourth (final), SiL & SiR fifth
+        FFSWAP(struct elem_to_channel, e2c_vec[6], e2c_vec[4]);   // FLc & FRc fifth (final), SiL & SiR seventh
+        FFSWAP(struct elem_to_channel, e2c_vec[7], e2c_vec[6]);   // LFE2 seventh (final), SiL & SiR eight (final)
+        FFSWAP(struct elem_to_channel, e2c_vec[9], e2c_vec[8]);   // TpFL & TpFR ninth (final), TFC tenth (final)
+        FFSWAP(struct elem_to_channel, e2c_vec[11], e2c_vec[10]); // TC eleventh (final), TpSiL & TpSiR twelth
+        FFSWAP(struct elem_to_channel, e2c_vec[12], e2c_vec[11]); // TpBL & TpBR twelth (final), TpSiL & TpSiR thirteenth (final)
+    } else {
+        // For everything else, utilize the AV channel position define as a
+        // stable sort.
+        do {
+            int next_n = 0;
+            for (i = 1; i < n; i++)
+                if (e2c_vec[i - 1].av_position > e2c_vec[i].av_position) {
+                    FFSWAP(struct elem_to_channel, e2c_vec[i - 1], e2c_vec[i]);
+                    next_n = i;
+                }
+            n = next_n;
+        } while (n > 0);
+
+    }
 
     layout = 0;
     for (i = 0; i < total_non_cc_elements; i++) {
@@ -520,13 +589,13 @@ static void flush(AVCodecContext *avctx)
  *
  * @return  Returns error status. 0 - OK, !0 - error
  */
-static int set_default_channel_config(AVCodecContext *avctx,
+static int set_default_channel_config(AACContext *ac, AVCodecContext *avctx,
                                       uint8_t (*layout_map)[3],
                                       int *tags,
                                       int channel_config)
 {
     if (channel_config < 1 || (channel_config > 7 && channel_config < 11) ||
-        channel_config > 12) {
+        channel_config > 13) {
         av_log(avctx, AV_LOG_ERROR,
                "invalid default channel configuration (%d)\n",
                channel_config);
@@ -547,7 +616,7 @@ static int set_default_channel_config(AVCodecContext *avctx,
      * As actual intended 7.1(wide) streams are very rare, default to assuming a
      * 7.1 layout was intended.
      */
-    if (channel_config == 7 && avctx->strict_std_compliance < FF_COMPLIANCE_STRICT) {
+    if (channel_config == 7 && avctx->strict_std_compliance < FF_COMPLIANCE_STRICT && (!ac || !ac->warned_71_wide++)) {
         av_log(avctx, AV_LOG_INFO, "Assuming an incorrectly encoded 7.1 channel layout"
                " instead of a spec-compliant 7.1(wide) layout, use -strict %d to decode"
                " according to the specification instead.\n", FF_COMPLIANCE_STRICT);
@@ -573,7 +642,7 @@ static ChannelElement *get_che(AACContext *ac, int type, int elem_id)
 
         av_log(ac->avctx, AV_LOG_DEBUG, "mono with CPE\n");
 
-        if (set_default_channel_config(ac->avctx, layout_map,
+        if (set_default_channel_config(ac, ac->avctx, layout_map,
                                        &layout_map_tags, 2) < 0)
             return NULL;
         if (output_configure(ac, layout_map, layout_map_tags,
@@ -592,7 +661,7 @@ static ChannelElement *get_che(AACContext *ac, int type, int elem_id)
 
         av_log(ac->avctx, AV_LOG_DEBUG, "stereo with SCE\n");
 
-        if (set_default_channel_config(ac->avctx, layout_map,
+        if (set_default_channel_config(ac, ac->avctx, layout_map,
                                        &layout_map_tags, 1) < 0)
             return NULL;
         if (output_configure(ac, layout_map, layout_map_tags,
@@ -606,6 +675,13 @@ static ChannelElement *get_che(AACContext *ac, int type, int elem_id)
     /* For indexed channel configurations map the channels solely based
      * on position. */
     switch (ac->oc[1].m4ac.chan_config) {
+    case 13:
+        if (ac->tags_mapped > 3 && ((type == TYPE_CPE && elem_id < 8) ||
+                                    (type == TYPE_SCE && elem_id < 6) ||
+                                    (type == TYPE_LFE && elem_id < 2))) {
+            ac->tags_mapped++;
+            return ac->tag_che_map[type][elem_id] = ac->che[type][elem_id];
+        }
     case 12:
     case 7:
         if (ac->tags_mapped == 3 && type == TYPE_CPE) {
@@ -841,7 +917,7 @@ static int decode_ga_specific_config(AACContext *ac, AVCodecContext *avctx,
         if (tags < 0)
             return tags;
     } else {
-        if ((ret = set_default_channel_config(avctx, layout_map,
+        if ((ret = set_default_channel_config(ac, avctx, layout_map,
                                               &tags, channel_config)))
             return ret;
     }
@@ -937,7 +1013,7 @@ static int decode_eld_specific_config(AACContext *ac, AVCodecContext *avctx,
         skip_bits_long(gb, 8 * len);
     }
 
-    if ((ret = set_default_channel_config(avctx, layout_map,
+    if ((ret = set_default_channel_config(ac, avctx, layout_map,
                                           &tags, channel_config)))
         return ret;
 
@@ -975,7 +1051,7 @@ static int decode_audio_specific_config_gb(AACContext *ac,
     int i, ret;
     GetBitContext gbc = *gb;
 
-    if ((i = ff_mpeg4audio_get_config_gb(m4ac, &gbc, sync_extension)) < 0)
+    if ((i = ff_mpeg4audio_get_config_gb(m4ac, &gbc, sync_extension, avctx)) < 0)
         return AVERROR_INVALIDDATA;
 
     if (m4ac->sampling_index > 12) {
@@ -1157,6 +1233,9 @@ static av_cold int aac_decode_init(AVCodecContext *avctx)
     AACContext *ac = avctx->priv_data;
     int ret;
 
+    if (avctx->sample_rate > 96000)
+        return AVERROR_INVALIDDATA;
+
     ret = ff_thread_once(&aac_table_init, &aac_static_table_init);
     if (ret != 0)
         return AVERROR_UNKNOWN;
@@ -1197,7 +1276,7 @@ static av_cold int aac_decode_init(AVCodecContext *avctx)
         ac->oc[1].m4ac.chan_config = i;
 
         if (ac->oc[1].m4ac.chan_config) {
-            int ret = set_default_channel_config(avctx, layout_map,
+            int ret = set_default_channel_config(ac, avctx, layout_map,
                 &layout_map_tags, ac->oc[1].m4ac.chan_config);
             if (!ret)
                 output_configure(ac, layout_map, layout_map_tags,
@@ -2659,7 +2738,7 @@ static void imdct_and_windowing(AACContext *ac, SingleChannelElement *sce)
         ac->mdct.imdct_half(&ac->mdct, buf, in);
 #if USE_FIXED
         for (i=0; i<1024; i++)
-          buf[i] = (buf[i] + 4) >> 3;
+          buf[i] = (buf[i] + 4LL) >> 3;
 #endif /* USE_FIXED */
     }
 
@@ -2999,7 +3078,7 @@ static int parse_adts_frame_header(AACContext *ac, GetBitContext *gb)
         push_output_configuration(ac);
         if (hdr_info.chan_config) {
             ac->oc[1].m4ac.chan_config = hdr_info.chan_config;
-            if ((ret = set_default_channel_config(ac->avctx,
+            if ((ret = set_default_channel_config(ac, ac->avctx,
                                                   layout_map,
                                                   &layout_map_tags,
                                                   hdr_info.chan_config)) < 0)
@@ -3246,9 +3325,15 @@ static int aac_decode_frame_int(AVCodecContext *avctx, void *data,
                     err = AVERROR_INVALIDDATA;
                     goto fail;
             }
-            while (elem_id > 0)
-                elem_id -= decode_extension_payload(ac, gb, elem_id, che_prev, che_prev_type);
-            err = 0; /* FIXME */
+            err = 0;
+            while (elem_id > 0) {
+                int ret = decode_extension_payload(ac, gb, elem_id, che_prev, che_prev_type);
+                if (ret < 0) {
+                    err = ret;
+                    break;
+                }
+                elem_id -= ret;
+            }
             break;
 
         default:

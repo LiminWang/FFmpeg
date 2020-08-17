@@ -21,6 +21,7 @@
 #include "libavutil/opt.h"
 
 #include "bsf.h"
+#include "bsf_internal.h"
 #include "cbs.h"
 #include "cbs_mpeg2.h"
 #include "mpeg12.h"
@@ -136,7 +137,7 @@ static int mpeg2_metadata_update_fragment(AVBSFContext *bsf,
                     se->vertical_size_extension << 12 | sh->vertical_size_value,
             };
 
-            err = ff_cbs_insert_unit_content(ctx->cbc, frag, se_pos + 1,
+            err = ff_cbs_insert_unit_content(frag, se_pos + 1,
                                              MPEG2_START_EXTENSION,
                                              &ctx->sequence_display_extension,
                                              NULL);
@@ -199,7 +200,7 @@ static int mpeg2_metadata_filter(AVBSFContext *bsf, AVPacket *pkt)
 
     err = 0;
 fail:
-    ff_cbs_fragment_reset(ctx->cbc, frag);
+    ff_cbs_fragment_reset(frag);
 
     if (err < 0)
         av_packet_unref(pkt);
@@ -212,6 +213,18 @@ static int mpeg2_metadata_init(AVBSFContext *bsf)
     MPEG2MetadataContext *ctx = bsf->priv_data;
     CodedBitstreamFragment *frag = &ctx->fragment;
     int err;
+
+#define VALIDITY_CHECK(name) do { \
+        if (!ctx->name) { \
+            av_log(bsf, AV_LOG_ERROR, "The value 0 for %s is " \
+                                      "forbidden.\n", #name); \
+            return AVERROR(EINVAL); \
+        } \
+    } while (0)
+    VALIDITY_CHECK(colour_primaries);
+    VALIDITY_CHECK(transfer_characteristics);
+    VALIDITY_CHECK(matrix_coefficients);
+#undef VALIDITY_CHECK
 
     err = ff_cbs_init(&ctx->cbc, AV_CODEC_ID_MPEG2VIDEO, bsf);
     if (err < 0)
@@ -239,7 +252,7 @@ static int mpeg2_metadata_init(AVBSFContext *bsf)
 
     err = 0;
 fail:
-    ff_cbs_fragment_reset(ctx->cbc, frag);
+    ff_cbs_fragment_reset(frag);
     return err;
 }
 
@@ -247,7 +260,7 @@ static void mpeg2_metadata_close(AVBSFContext *bsf)
 {
     MPEG2MetadataContext *ctx = bsf->priv_data;
 
-    ff_cbs_fragment_free(ctx->cbc, &ctx->fragment);
+    ff_cbs_fragment_free(&ctx->fragment);
     ff_cbs_close(&ctx->cbc);
 }
 
